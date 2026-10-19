@@ -12,12 +12,12 @@ using WheresWolfgang.SaveScopedConfig;
 namespace CrestLoadouts
 {
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
-    [BepInDependency(SaveScopedConfigPlugin.PluginGuid)]
-    public sealed class Plugin : BaseUnityPlugin
+    [BepInDependency(SaveScopedConfigPlugin.PluginGuid, "0.4.0")]
+    public sealed partial class Plugin : BaseUnityPlugin
     {
         public const string PluginGuid = "whereswolfgang.crestloadouts";
         public const string PluginName = "Crest Loadouts";
-        public const string PluginVersion = "0.1.2";
+        public const string PluginVersion = "0.2.0";
 
         private static readonly Harmony Harmony = new Harmony(PluginGuid);
         private static readonly FieldInfo CrestEquipMsgField =
@@ -70,7 +70,12 @@ namespace CrestLoadouts
             saveConfig = SaveScopedConfig.For(this);
 
             BindConfig();
-            Harmony.PatchAll(typeof(Plugin).Assembly);
+            BindLoadoutControls();
+            SaveScopedConfig.ActiveSaveChanged += ClearPresetFeedback;
+            runtimeReady = ModCompatibility.TryPatch(Harmony, typeof(Plugin).Assembly, Logger,
+                out compatibilityStatus, AccessTools.Field(typeof(HeroController), "configs"),
+                AccessTools.Field(typeof(HeroController), "crestConfig"),
+                AccessTools.Method(typeof(HeroController), "Attack"));
             Logger.LogInfo(PluginName + " loaded.");
         }
 
@@ -559,6 +564,7 @@ namespace CrestLoadouts
 
         private void OnDestroy()
         {
+            SaveScopedConfig.ActiveSaveChanged -= ClearPresetFeedback;
             AttackOverrideController.Clear();
             if (saveConfig != null)
             {

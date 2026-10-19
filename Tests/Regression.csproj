@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>Silksong.ModRegression</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <ManagedDir>$(GameDir)/Hollow Knight Silksong_Data/Managed</ManagedDir>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="$(ManagedDir)/*.dll" Exclude="$(ManagedDir)/mscorlib.dll;$(ManagedDir)/netstandard.dll;$(ManagedDir)/System*.dll">
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="$(GameDir)/BepInEx/core/BepInEx.dll">
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="$(GameDir)/BepInEx/core/0Harmony.dll">
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="$(SaveScopedConfigPath)">
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

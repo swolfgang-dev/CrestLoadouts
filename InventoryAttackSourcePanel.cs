@@ -672,8 +672,7 @@ namespace CrestLoadouts
 
         private static bool IsOpenAttackSwitcherInputPressed()
         {
-            return Input.GetKeyDown(KeyCode.C) ||
-                InControl.InputManager.ActiveDevice.Action3.WasPressed;
+            return Plugin.Instance != null && Plugin.Instance.IsEditorShortcutPressed();
         }
 
         private bool IsAttackSwitcherVisible
