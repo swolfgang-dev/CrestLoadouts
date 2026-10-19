@@ -673,7 +673,7 @@ namespace CrestLoadouts
         private static bool IsOpenAttackSwitcherInputPressed()
         {
             return Input.GetKeyDown(KeyCode.C) ||
-                Input.GetKeyDown(KeyCode.JoystickButton2);
+                InControl.InputManager.ActiveDevice.Action3.WasPressed;
         }
 
         private bool IsAttackSwitcherVisible
@@ -713,7 +713,7 @@ namespace CrestLoadouts
 
         private void CloseAttackSwitcher(bool returnToCrest, bool restoreDescription)
         {
-            Plugin.Log?.LogInfo(
+            Plugin.Log?.LogDebug(
                 "Crest Loadouts CloseAttackSwitcher: returnToCrest=" + returnToCrest +
                 ", restoreDescription=" + restoreDescription +
                 ", attackSwitcherOpen=" + attackSwitcherOpen +
@@ -2098,20 +2098,22 @@ namespace CrestLoadouts
             for (int i = 0; i < texts.Length; i++)
             {
                 TextMeshPro text = texts[i];
-                if (text == null || string.IsNullOrEmpty(text.text))
+                if (text == null || !text.isActiveAndEnabled || string.IsNullOrEmpty(text.text))
                 {
                     continue;
                 }
 
                 text.ForceMeshUpdate();
-                Bounds textBounds = text.textBounds;
-                if (textBounds.size.sqrMagnitude <= 0.0001f)
+                // The game's legacy TMP textBounds getter can index stale character
+                // arrays on cloned labels. Renderer bounds use the generated mesh instead.
+                Renderer textRenderer = text.GetComponent<Renderer>();
+                if (textRenderer == null || textRenderer.bounds.size.sqrMagnitude <= 0.0001f)
                 {
                     continue;
                 }
 
-                Vector3 worldMin = text.transform.TransformPoint(textBounds.min);
-                Vector3 worldMax = text.transform.TransformPoint(textBounds.max);
+                Vector3 worldMin = textRenderer.bounds.min;
+                Vector3 worldMax = textRenderer.bounds.max;
                 Vector3 localMin = transform.InverseTransformPoint(worldMin);
                 Vector3 localMax = transform.InverseTransformPoint(worldMax);
                 Bounds localBounds = new Bounds((localMin + localMax) * 0.5f, localMax - localMin);

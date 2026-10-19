@@ -17,7 +17,7 @@ namespace CrestLoadouts
     {
         public const string PluginGuid = "whereswolfgang.crestloadouts";
         public const string PluginName = "Crest Loadouts";
-        public const string PluginVersion = "0.1.0";
+        public const string PluginVersion = "0.1.2";
 
         private static readonly Harmony Harmony = new Harmony(PluginGuid);
         private static readonly FieldInfo CrestEquipMsgField =
@@ -626,16 +626,62 @@ namespace CrestLoadouts
             }
         }
 
+        [HarmonyPatch(typeof(HutongGames.PlayMaker.Actions.CheckIfCrestEquipped), "IsTrue", MethodType.Getter)]
+        private static class AttackFsmCrestCheckPatch
+        {
+            private static void Postfix(HutongGames.PlayMaker.Actions.CheckIfCrestEquipped __instance, ref bool __result)
+            {
+                if (Instance == null || __instance.Fsm == null || __instance.State == null)
+                {
+                    return;
+                }
+
+                string fsm = __instance.Fsm.Name;
+                string state = __instance.State.Name;
+                AttackSource source;
+                if (fsm == "Sprint" &&
+                    (state == "Start Attack" || state == "Attack Dash Start" ||
+                     state == "Reaction Type" || state == "Set Atk Cooldown" || state == "Witch?"))
+                {
+                    source = Instance.DashAttackSource;
+                }
+                else if (fsm == "Nail Arts" && (state == "Antic Type" || state == "Slash Recoil?"))
+                {
+                    source = Instance.NeedleStrikeSource;
+                }
+                else
+                {
+                    return;
+                }
+
+                HeroController hero = HeroController.UnsafeInstance;
+                if (hero == null || __instance.Fsm.GameObject != hero.gameObject ||
+                    !IsSupportedCrestId(GetEquippedCrestId()))
+                {
+                    return;
+                }
+
+                ToolCrest crest = __instance.Crest.Value as ToolCrest;
+                if (crest != null)
+                {
+                    __result = TryGetAttackSourceForCrestName(crest.name, out AttackSource crestSource) &&
+                        crestSource == source;
+                }
+            }
+        }
+
         [HarmonyPatch(typeof(HeroAnimationController), "GetClip")]
         private static class HeroAnimationControllerGetClipPatch
         {
-            private static void Postfix(HeroAnimationController __instance, string clipName, ref tk2dSpriteAnimationClip __result)
+            private static bool Prefix(HeroAnimationController __instance, string clipName, ref tk2dSpriteAnimationClip __result)
             {
                 tk2dSpriteAnimationClip clip;
                 if (AttackOverrideController.TryGetActiveAnimationClip(__instance, clipName, out clip))
                 {
                     __result = clip;
+                    return false;
                 }
+                return true;
             }
         }
 
@@ -650,7 +696,7 @@ namespace CrestLoadouts
                     {
                         if (!IsBenchMessageCancelInputPressed())
                         {
-                            Log?.LogInfo("Crest Loadouts blocking InventoryToolCrestList.Update while attack bench message is showing.");
+                            Log?.LogDebug("Crest Loadouts blocking InventoryToolCrestList.Update while attack bench message is showing.");
                             return false;
                         }
 
@@ -666,7 +712,7 @@ namespace CrestLoadouts
 
                 if (InventoryAttackSourcePanel.IsAnyAttackSwitcherOpen)
                 {
-                    Log?.LogInfo("Crest Loadouts blocking InventoryToolCrestList.Update because attack switcher is open.");
+                    Log?.LogDebug("Crest Loadouts blocking InventoryToolCrestList.Update because attack switcher is open.");
                     return false;
                 }
 
@@ -843,7 +889,7 @@ namespace CrestLoadouts
 
         private static bool IsBenchMessageCancelInputPressed()
         {
-            return Input.GetKeyDown(KeyCode.JoystickButton1) ||
+            return InControl.InputManager.ActiveDevice.Action2.WasPressed ||
                 Input.GetKeyDown(KeyCode.Escape) ||
                 Input.GetKeyDown(KeyCode.Backspace);
         }

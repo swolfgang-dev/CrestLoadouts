@@ -31,6 +31,119 @@ namespace CrestLoadouts
         private static readonly FieldInfo DashStabAltField = AccessTools.Field(typeof(HeroController.ConfigGroup), "DashStabAlt");
         private static readonly FieldInfo ChargeSlashField = AccessTools.Field(typeof(HeroController.ConfigGroup), "ChargeSlash");
 
+        // Dash/needle overrides change ConfigGroup references and ScriptableObject fields.
+        // Restore their vanilla values before resolving the next source, including resets.
+        private static readonly List<OriginalGroupState> OriginalGroups = new List<OriginalGroupState>();
+        private static HeroController originalGroupsHero;
+        private static HutongGames.PlayMaker.FsmBool sprintInAttack;
+        private static PlayMakerFSM nailArtsFsm;
+        private static readonly List<HutongGames.PlayMaker.Actions.GetHeroAttackObject> CachedDashObjects = new List<HutongGames.PlayMaker.Actions.GetHeroAttackObject>();
+        private static readonly List<HutongGames.PlayMaker.Actions.GetHeroConfigVariable> CachedDashVariables = new List<HutongGames.PlayMaker.Actions.GetHeroConfigVariable>();
+        private static readonly string[] OverriddenConfigFields =
+        {
+            "dashStabSpeed", "dashStabTime", "forceShortDashStabBounce",
+            "dashStabBounceJumpSpeed", "dashStabSteps", "canHarpoonDash",
+            "chargeSlashRecoils", "chargeSlashLungeSpeed", "chargeSlashLungeDeceleration", "chargeSlashChain",
+        };
+
+        private static void RestoreOriginalGroups()
+        {
+            foreach (OriginalGroupState state in OriginalGroups)
+            {
+                state.Group.DashStab = state.DashStab;
+                state.Group.DashStabAlt = state.DashStabAlt;
+                state.Group.ChargeSlash = state.ChargeSlash;
+                if (state.Config != null)
+                {
+                    foreach (KeyValuePair<FieldInfo, object> field in state.ConfigValues)
+                    {
+                        field.Key.SetValue(state.Config, field.Value);
+                    }
+                }
+            }
+        }
+
+        private static void PrepareOriginalGroups(HeroController heroController)
+        {
+            RestoreOriginalGroups();
+            if (originalGroupsHero == heroController)
+            {
+                return;
+            }
+
+            OriginalGroups.Clear();
+            originalGroupsHero = heroController;
+            sprintInAttack = null;
+            nailArtsFsm = null;
+            CachedDashObjects.Clear();
+            CachedDashVariables.Clear();
+            foreach (PlayMakerFSM fsm in heroController.GetComponents<PlayMakerFSM>())
+            {
+                if (fsm.FsmName == "Sprint")
+                {
+                    sprintInAttack = fsm.FsmVariables.FindFsmBool("In Attack");
+                    foreach (HutongGames.PlayMaker.FsmState state in fsm.FsmStates)
+                    {
+                        foreach (HutongGames.PlayMaker.FsmStateAction action in state.Actions)
+                        {
+                            if (action is HutongGames.PlayMaker.Actions.GetHeroAttackObject attackObject)
+                            {
+                                CachedDashObjects.Add(attackObject);
+                            }
+                            else if (action is HutongGames.PlayMaker.Actions.GetHeroConfigVariable variable &&
+                                (variable.VariableName.Value == nameof(HeroControllerConfig.DashStabSpeed) ||
+                                 variable.VariableName.Value == nameof(HeroControllerConfig.DashStabTime) ||
+                                 variable.VariableName.Value == nameof(HeroControllerConfig.DashStabSteps)))
+                            {
+                                CachedDashVariables.Add(variable);
+                            }
+                        }
+                    }
+                }
+                else if (fsm.FsmName == "Nail Arts")
+                {
+                    nailArtsFsm = fsm;
+                }
+            }
+            HeroController.ConfigGroup[] groups = ConfigsField?.GetValue(heroController) as HeroController.ConfigGroup[];
+            if (groups == null)
+            {
+                return;
+            }
+
+            foreach (HeroController.ConfigGroup group in groups)
+            {
+                if (group == null || group.Config == null)
+                {
+                    continue;
+                }
+
+                OriginalGroupState state = new OriginalGroupState
+                {
+                    Group = group, Config = group.Config,
+                    DashStab = group.DashStab, DashStabAlt = group.DashStabAlt,
+                    ChargeSlash = group.ChargeSlash,
+                };
+                foreach (string name in OverriddenConfigFields)
+                {
+                    FieldInfo field = AccessTools.Field(typeof(HeroControllerConfig), name);
+                    if (field != null)
+                    {
+                        state.ConfigValues[field] = field.GetValue(group.Config);
+                    }
+                }
+                OriginalGroups.Add(state);
+            }
+        }
+
+        private sealed class OriginalGroupState
+        {
+            internal HeroController.ConfigGroup Group;
+            internal HeroControllerConfig Config;
+            internal GameObject DashStab, DashStabAlt, ChargeSlash;
+            internal readonly Dictionary<FieldInfo, object> ConfigValues = new Dictionary<FieldInfo, object>();
+        }
+
         private static readonly HashSet<GameObject> ActivatedSourceRoots = new HashSet<GameObject>();
         private static readonly Stack<AttackContext> AttackContexts = new Stack<AttackContext>();
         private static AttackContext activeSpoofContext;
@@ -54,6 +167,7 @@ namespace CrestLoadouts
                 return;
             }
 
+            PrepareOriginalGroups(heroController);
             var usedRoots = new HashSet<GameObject>();
             ApplyNeutral(heroController, ResolveSourceGroup(heroController, Plugin.Instance.NeutralAttackSource), usedRoots);
             ApplyUp(heroController, ResolveSourceGroup(heroController, Plugin.Instance.UpAttackSource), usedRoots);
@@ -67,6 +181,7 @@ namespace CrestLoadouts
             }
 
             SyncSourceRoots(heroController.CurrentConfigGroup, usedRoots);
+            RefreshCachedDashObjects(heroController);
         }
 
         internal static void BeginAttackOverride(HeroController heroController, AttackDirection attackDirection)
@@ -166,6 +281,13 @@ namespace CrestLoadouts
                 return false;
             }
 
+            // A sprint attack can cancel down-spike recovery. Its config must
+            // come from the equipped group with the selected dash fields.
+            if (sprintInAttack != null && sprintInAttack.Value)
+            {
+                return false;
+            }
+
             if (downConfigDepth > 0 || IsDownAttackState(heroController))
             {
                 config = downConfig;
@@ -178,10 +300,7 @@ namespace CrestLoadouts
         internal static bool TryGetActiveAnimationClip(HeroAnimationController animationController, string clipName, out tk2dSpriteAnimationClip clip)
         {
             clip = null;
-            if (animationController == null ||
-                animationConfigHero == null ||
-                animationConfig == null ||
-                !IsAttackAnimationClip(clipName))
+            if (animationController == null || !IsAttackAnimationClip(clipName))
             {
                 return false;
             }
@@ -189,13 +308,56 @@ namespace CrestLoadouts
             HeroController heroController = AnimationHeroControllerField == null
                 ? HeroController.UnsafeInstance
                 : AnimationHeroControllerField.GetValue(animationController) as HeroController;
-            if (heroController != animationConfigHero || !IsAnyAttackState(heroController))
+            if (heroController == null)
             {
                 return false;
             }
 
-            clip = animationConfig.GetAnimationClip(clipName);
+            HeroControllerConfig config = null;
+            if (heroController == originalGroupsHero && Plugin.Instance != null)
+            {
+                if (TryGetActiveConfig(heroController, out HeroControllerConfig downAttackConfig))
+                {
+                    config = downAttackConfig;
+                }
+                else if ((sprintInAttack != null && sprintInAttack.Value) ||
+                    clipName == "Dash Upper Recovery" || clipName == "Dash Attack Recover")
+                {
+                    config = ResolveSourceGroup(heroController, Plugin.Instance.DashAttackSource)?.Config;
+                }
+                else if (nailArtsFsm != null && IsNeedleStrikeActive(nailArtsFsm.ActiveStateName))
+                {
+                    config = ResolveSourceGroup(heroController, Plugin.Instance.NeedleStrikeSource)?.Config;
+                }
+            }
+
+            if (config == null && heroController == animationConfigHero && IsAnyAttackState(heroController))
+            {
+                config = animationConfig;
+            }
+
+            // Missing per-crest overrides use the base animation library, as they do
+            // when that source crest is equipped. The equipped crest may override
+            // the same name, so its already-resolved result is not a safe fallback.
+            clip = config == null ? null : config.GetAnimationClip(clipName) ??
+                animationController.animator.GetClipByName(clipName);
             return clip != null;
+        }
+
+        private static bool IsNeedleStrikeActive(string state)
+        {
+            switch (state)
+            {
+                case "Inactive":
+                case "Idle":
+                case "Init":
+                case "FSM CANCEL":
+                case "Cancel All":
+                case "Can Nail Art?":
+                    return false;
+                default:
+                    return !string.IsNullOrEmpty(state);
+            }
         }
 
         internal static void ClearAnimationConfigIfReady(HeroController heroController)
@@ -240,9 +402,61 @@ namespace CrestLoadouts
 
             CrestConfigField?.SetValue(context.HeroController, context.OriginalConfig);
             CurrentConfigGroupField?.SetValue(context.HeroController, context.OriginalGroup);
+            context.HeroController.GetComponent<HeroAnimationController>()?.SetHeroControllerConfig(context.OriginalGroup?.Config);
             if (context.OriginalGroup != null && context.OriginalGroup.ActiveRoot != null)
             {
                 context.OriginalGroup.ActiveRoot.SetActive(true);
+            }
+        }
+
+        private static void RefreshCachedDashObjects(HeroController heroController)
+        {
+            HeroController.ConfigGroup group = heroController.CurrentConfigGroup;
+            if (group == null)
+            {
+                return;
+            }
+
+            // Sprint caches these values when the equipped crest changes. Attack
+            // source changes do not emit that event, and the vanilla event runs
+            // before our SetConfigGroup postfix, so refresh the cached variables.
+            foreach (HutongGames.PlayMaker.Actions.GetHeroAttackObject action in CachedDashObjects)
+            {
+                if (action.Attack == null || action.StoreAttack == null)
+                {
+                    continue;
+                }
+
+                switch ((HutongGames.PlayMaker.Actions.GetHeroAttackObject.AttackObjects)(object)action.Attack.Value)
+                {
+                    case HutongGames.PlayMaker.Actions.GetHeroAttackObject.AttackObjects.DashStab:
+                        action.StoreAttack.Value = group.DashStab;
+                        break;
+                    case HutongGames.PlayMaker.Actions.GetHeroAttackObject.AttackObjects.DashStabAlt:
+                        action.StoreAttack.Value = group.DashStabAlt;
+                        break;
+                }
+            }
+
+            foreach (HutongGames.PlayMaker.Actions.GetHeroConfigVariable variable in CachedDashVariables)
+            {
+                if (variable.StoreValue.IsNone)
+                {
+                    continue;
+                }
+
+                switch (variable.VariableName.Value)
+                {
+                    case nameof(HeroControllerConfig.DashStabSpeed):
+                        variable.StoreValue.SetValue(group.Config.DashStabSpeed);
+                        break;
+                    case nameof(HeroControllerConfig.DashStabTime):
+                        variable.StoreValue.SetValue(group.Config.DashStabTime);
+                        break;
+                    case nameof(HeroControllerConfig.DashStabSteps):
+                        variable.StoreValue.SetValue(group.Config.DashStabSteps);
+                        break;
+                }
             }
         }
 
@@ -300,7 +514,7 @@ namespace CrestLoadouts
             AddSourceRoot(sourceGroup, usedRoots);
             DashStabField?.SetValue(heroController.CurrentConfigGroup, DashStabField.GetValue(sourceGroup));
             DashStabAltField?.SetValue(heroController.CurrentConfigGroup, DashStabAltField.GetValue(sourceGroup));
-            CopyConfigFields(sourceGroup.Config, heroController.Config, "dashStabSpeed", "dashStabTime", "forceShortDashStabBounce", "dashStabBounceJumpSpeed", "dashStabSteps", "canHarpoonDash");
+            CopyConfigFields(sourceGroup.Config, heroController.CurrentConfigGroup.Config, "dashStabSpeed", "dashStabTime", "forceShortDashStabBounce", "dashStabBounceJumpSpeed", "dashStabSteps", "canHarpoonDash");
         }
 
         private static void ApplyNeedleStrike(HeroController heroController, HeroController.ConfigGroup sourceGroup, HashSet<GameObject> usedRoots)
@@ -312,7 +526,7 @@ namespace CrestLoadouts
 
             AddSourceRoot(sourceGroup, usedRoots);
             ChargeSlashField?.SetValue(heroController.CurrentConfigGroup, ChargeSlashField.GetValue(sourceGroup));
-            CopyConfigFields(sourceGroup.Config, heroController.Config, "chargeSlashRecoils", "chargeSlashLungeSpeed", "chargeSlashLungeDeceleration", "chargeSlashChain");
+            CopyConfigFields(sourceGroup.Config, heroController.CurrentConfigGroup.Config, "chargeSlashRecoils", "chargeSlashLungeSpeed", "chargeSlashLungeDeceleration", "chargeSlashChain");
         }
 
         private static void CopyConfigFields(HeroControllerConfig source, HeroControllerConfig target, params string[] fieldNames)
@@ -421,6 +635,8 @@ namespace CrestLoadouts
                 case "UpSlashAlt":
                 case "DownSlash":
                 case "DownSlashAlt":
+                case "v3 Down Slash Antic":
+                case "v3 Down Slash":
                 case "DownSpike":
                 case "DownSpike Antic":
                 case "DownSpikeBounce 1":
@@ -432,11 +648,17 @@ namespace CrestLoadouts
                 case "Charge Attack":
                 case "ChargeSlash":
                 case "ChargeSlashAlt":
+                case "SpinBall Antic":
+                case "SpinBall Launch":
+                case "SpinBall":
+                case "SpinBall End":
                 case "Needle Strike":
                     return true;
                 default:
                     return clipName != null &&
-                        (clipName.IndexOf("Charge", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        (clipName.IndexOf("Dash", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        clipName.IndexOf("Stab", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        clipName.IndexOf("Charge", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
                         clipName.IndexOf("Needle", System.StringComparison.OrdinalIgnoreCase) >= 0);
             }
         }
@@ -521,6 +743,13 @@ namespace CrestLoadouts
 
         internal static void Clear()
         {
+            RestoreOriginalGroups();
+            OriginalGroups.Clear();
+            CachedDashObjects.Clear();
+            CachedDashVariables.Clear();
+            originalGroupsHero = null;
+            sprintInAttack = null;
+            nailArtsFsm = null;
             foreach (GameObject root in ActivatedSourceRoots)
             {
                 if (root != null)
